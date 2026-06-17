@@ -7,6 +7,7 @@ from dotenv import load_dotenv
 from scrapers.gnews_scraper import scrape_gnews
 from scrapers.telegram_scraper import scrape_telegram
 from scrapers.reddit_scraper import scrape_reddit
+from cryptoBERT.sentiment.sentiment import analyze_sentiment
 
 load_dotenv()
 
@@ -62,7 +63,6 @@ async def collect_all_data(query: str):
     print(f"\nColeta finalizada! {len(unified_results)} itens consolidados.")
     print(f"Arquivo salvo como: {output_filename}")
     
-    from cryptoBERT.sentiment.sentiment import analyze_sentiment
     final_output_filename = f"final_sentiment_{query.replace(' ', '_').lower()}.json"
     analyze_sentiment(output_filename, final_output_filename)
     
