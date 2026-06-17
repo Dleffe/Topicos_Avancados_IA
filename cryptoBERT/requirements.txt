@@ -1,0 +1,7 @@
+feedparser==6.0.12
+python-dotenv==1.2.2
+python_dateutil==2.9.0.post0
+telethon==1.44.0
+torch==2.12.0
+transformers==5.12.1
+twikit==2.3.3
