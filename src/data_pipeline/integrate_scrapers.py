@@ -28,10 +28,10 @@ def save_json(data: list, filepath: str) -> None:
         json.dump(data, f, ensure_ascii=False, indent=4)
 
 async def step_1_extract(mode: str = "historical"):
-    print(f"\n[ETL - FASE 1] Iniciando Extração ({mode})...")
+    print(f"\nModo: {mode}")
     
     if mode == "historical":
-        print("1/3 -> Raspando Telegram...")
+        print("1/3 -> Procurando Telegram...")
         start_dt = pd.to_datetime(START_DATE)
         end_dt = pd.to_datetime(END_DATE)
         telegram_data = await telegram_scraper.get_historical_data(
@@ -40,23 +40,23 @@ async def step_1_extract(mode: str = "historical"):
         )
         save_json(telegram_data, "temp_telegram.json")
         
-        print("2/3 -> Raspando Reddit (PullPush)...")
+        print("2/3 -> Procurando Reddit (PullPush)...")
         reddit_data = reddit_scraper.get_historical_data(START_DATE, END_DATE, TARGET_SUBREDDITS)
         save_json(reddit_data, "temp_reddit.json")
         
-        print("3/3 -> Raspando Google News...")
+        print("3/3 -> Procurando Google News...")
         gnews_data = gnews_scraper.get_historical_data(QUERY, START_DATE, END_DATE)
         save_json(gnews_data, "temp_gnews.json")
     else:
-        print("1/3 -> Raspando Telegram...")
+        print("1/3 -> Procurando Telegram...")
         telegram_data = await telegram_scraper.get_current_data(query=QUERY)
         save_json(telegram_data, "temp_telegram.json")
         
-        print("2/3 -> Raspando Reddit...")
+        print("2/3 -> Procurando Reddit...")
         reddit_data = reddit_scraper.get_current_data(query=QUERY, subreddits=TARGET_SUBREDDITS)
         save_json(reddit_data, "temp_reddit.json")
         
-        print("3/3 -> Raspando Google News...")
+        print("3/3 -> Procurando Google News...")
         gnews_data = gnews_scraper.get_current_data(query=QUERY)
         save_json(gnews_data, "temp_gnews.json")
     
@@ -91,28 +91,25 @@ def step_2_transform_and_load():
     print(f"Total de {len(df)} textos unificados. Carregando modelo NLP...")
     
     os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-    sentiment_pipeline = pipeline("text-classification", model="ElKulako/cryptobert", truncation=True, max_length=512)
+    # Specify device=0 to ensure GPU usage. Adjust batch_size based on VRAM.
+    sentiment_pipeline = pipeline("text-classification", model="ElKulako/cryptobert", truncation=True, max_length=512, device=0)
     
     platform_weights = {"Telegram": 1.2, "Google News": 1.0, "Reddit": 0.8}
     
-    sentiment_scores = []
+    print("Calculando escores de sentimento em batch...")
     
-    print("Calculando escores de sentimento linha a linha...")
-    for idx, row in df.iterrows():
-        try:
-            text = row['text'][:1500]
-            result = sentiment_pipeline(text)[0]
-            
-            label = result["label"]
-            confidence = result["score"]
-            weight = platform_weights.get(row['platform'], 1.0)
-            
-            direction = 1.0 if label == "Bullish" else (-1.0 if label == "Bearish" else 0.0)
-            final_score = direction * confidence * weight
-            
-            sentiment_scores.append(final_score)
-        except Exception:
-            sentiment_scores.append(0.0)
+    texts_to_process = df['text'].str.slice(0, 1500).tolist()
+    results = sentiment_pipeline(texts_to_process, batch_size=32)
+    
+    sentiment_scores = []
+    for i, result in enumerate(results):
+        label = result["label"]
+        confidence = result["score"]
+        platform = df.iloc[i]['platform']
+        weight = platform_weights.get(platform, 1.0)
+        direction = 1.0 if label == "Bullish" else (-1.0 if label == "Bearish" else 0.0)
+        final_score = direction * confidence * weight
+        sentiment_scores.append(final_score)
             
     df['sentiment_scalar'] = sentiment_scores
     
