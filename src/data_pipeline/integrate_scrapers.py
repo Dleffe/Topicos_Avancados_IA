@@ -2,6 +2,9 @@ import os
 import json
 import pandas as pd
 import asyncio
+import argparse
+import tempfile
+import torch
 from transformers import pipeline
 
 from src.data_pipeline.gnews_scraper import GoogleNewsScraper
@@ -12,107 +15,141 @@ START_DATE = "2023-01-01"
 END_DATE = "2023-02-01"
 QUERY = "Bitcoin"
 TARGET_SUBREDDITS = ["Bitcoin", "CryptoCurrency", "CryptoMarkets"]
-
-gnews_scraper = GoogleNewsScraper()
-reddit_scraper = RedditScraper()
-telegram_scraper = TelegramScraper()
-
+# Constants that are less likely to change can remain here
+PLATFORM_WEIGHTS = {"Telegram": 1.2, "Google News": 1.0, "Reddit": 0.8}
+MODEL_NAME = "ElKulako/cryptobert"
+ 
 def load_json(filepath: str) -> list:
     if os.path.exists(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
+        try:
+            with open(filepath, 'r', encoding='utf-8') as f:
+                return json.load(f)
+        except (json.JSONDecodeError, FileNotFoundError):
+            print(f"Warning: Could not decode JSON from {filepath}. File might be empty or corrupt.")
+            return []
     return []
 
 def save_json(data: list, filepath: str) -> None:
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
+async def step_1_extract(mode: str, start_date: str, end_date: str, query: str, subreddits: list, temp_dir: str):
+    print(f"\n[ETL - FASE 1] Extraindo dados em modo: {mode}")
+    
+    gnews_scraper = GoogleNewsScraper()
+    reddit_scraper = RedditScraper()
+    telegram_scraper = TelegramScraper()
 
-async def step_1_extract(mode: str = "historical"):
-    print(f"\nModo: {mode}")
+    telegram_path = os.path.join(temp_dir, "telegram_data.json")
+    reddit_path = os.path.join(temp_dir, "reddit_data.json")
+    gnews_path = os.path.join(temp_dir, "gnews_data.json")
     
     if mode == "historical":
         print("1/3 -> Procurando Telegram...")
-        start_dt = pd.to_datetime(START_DATE)
-        end_dt = pd.to_datetime(END_DATE)
+        start_dt = pd.to_datetime(start_date)
+        end_dt = pd.to_datetime(end_date)
         telegram_data = await telegram_scraper.get_historical_data(
             start_dt.year, start_dt.month, 
-            end_dt.year, end_dt.month
+            end_dt.year, end_dt.month,
+            channels=None
         )
-        save_json(telegram_data, "temp_telegram.json")
+        save_json(telegram_data, telegram_path)
         
         print("2/3 -> Procurando Reddit (PullPush)...")
-        reddit_data = reddit_scraper.get_historical_data(START_DATE, END_DATE, TARGET_SUBREDDITS)
-        save_json(reddit_data, "temp_reddit.json")
+        reddit_data = reddit_scraper.get_historical_data(start_date, end_date, subreddits)
+        save_json(reddit_data, reddit_path)
         
         print("3/3 -> Procurando Google News...")
-        gnews_data = gnews_scraper.get_historical_data(QUERY, START_DATE, END_DATE)
-        save_json(gnews_data, "temp_gnews.json")
-    else:
+        gnews_data = gnews_scraper.get_historical_data(query, start_date, end_date)
+        save_json(gnews_data, gnews_path)
+
+    elif mode == "current":
         print("1/3 -> Procurando Telegram...")
-        telegram_data = await telegram_scraper.get_current_data(query=QUERY)
-        save_json(telegram_data, "temp_telegram.json")
+        telegram_data = await telegram_scraper.get_current_data(query=query)
+        save_json(telegram_data, telegram_path)
         
         print("2/3 -> Procurando Reddit...")
-        reddit_data = reddit_scraper.get_current_data(query=QUERY, subreddits=TARGET_SUBREDDITS)
-        save_json(reddit_data, "temp_reddit.json")
+        reddit_data = reddit_scraper.get_current_data(query=query, subreddits=subreddits)
+        save_json(reddit_data, reddit_path)
         
         print("3/3 -> Procurando Google News...")
-        gnews_data = gnews_scraper.get_current_data(query=QUERY)
-        save_json(gnews_data, "temp_gnews.json")
+        gnews_data = gnews_scraper.get_current_data(query=query)
+        save_json(gnews_data, gnews_path)
     
     print("[ETL - FASE 1] Concluída. Arquivos JSON temporários gerados.")
+    return telegram_path, reddit_path, gnews_path
 
-def step_2_transform_and_load():
-    print("\n[ETL - FASE 2] Unificando dados e inferindo Sentimento (CryptoBERT)...")
-    
+def unify_data(tg_path: str, rd_path: str, gn_path: str) -> pd.DataFrame:
     all_data = []
     
-    tg_data = load_json("temp_telegram.json")
+    tg_data = load_json(tg_path)
     for item in tg_data: item['platform'] = 'Telegram'
     all_data.extend(tg_data)
     
-    rd_data = load_json("temp_reddit.json")
+    rd_data = load_json(rd_path)
     for item in rd_data: item['platform'] = 'Reddit'
     all_data.extend(rd_data)
     
-    gn_data = load_json("temp_gnews.json")
-    for item in gn_data: item['platform'] = 'Google News'
+    gn_data = load_json(gn_path)
+    for item in gn_data: 
+        item['text'] = f"{item.get('title', '')}. {item.get('desc', '')}"
+        item['created_at'] = item.get('date')
+        item['platform'] = 'Google News'
     all_data.extend(gn_data)
     
     if not all_data:
-        print("Erro: Nenhum dado extraído.")
-        return
+        print("Aviso: Nenhum dado foi extraído das fontes.")
+        return pd.DataFrame()
         
     df = pd.DataFrame(all_data)
-    df['created_at'] = pd.to_datetime(df['created_at'], utc=True)
+    df['created_at'] = pd.to_datetime(df['created_at'], utc=True, errors='coerce')
     df = df.dropna(subset=['text', 'created_at'])
     df = df.sort_values('created_at')
+    df['text'] = df['text'].astype(str)
     
+    return df
+
+def calculate_sentiment(df: pd.DataFrame, batch_size: int) -> pd.DataFrame:
+    if df.empty:
+        return df
+
     print(f"Total de {len(df)} textos unificados. Carregando modelo NLP...")
     
-    os.environ["HF_HUB_DISABLE_SYMLINKS_WARNING"] = "1"
-    # Specify device=0 to ensure GPU usage. Adjust batch_size based on VRAM.
-    sentiment_pipeline = pipeline("text-classification", model="ElKulako/cryptobert", truncation=True, max_length=512, device=0)
+    device = "cuda:0" if torch.cuda.is_available() else "cpu"
+    print(f"Usando dispositivo: {device}")
+
+    sentiment_pipeline = pipeline(
+        "text-classification", 
+        model=MODEL_NAME, 
+        truncation=True, 
+        max_length=512, 
+        device=device
+    )
     
-    platform_weights = {"Telegram": 1.2, "Google News": 1.0, "Reddit": 0.8}
-    
-    print("Calculando escores de sentimento em batch...")
+    print(f"Calculando escores de sentimento em batch (tamanho={batch_size})...")
     
     texts_to_process = df['text'].str.slice(0, 1500).tolist()
-    results = sentiment_pipeline(texts_to_process, batch_size=32)
+    results = sentiment_pipeline(texts_to_process, batch_size=batch_size)
     
     sentiment_scores = []
     for i, result in enumerate(results):
         label = result["label"]
         confidence = result["score"]
-        platform = df.iloc[i]['platform']
-        weight = platform_weights.get(platform, 1.0)
+        platform = df.iloc[i]['platform']        
+        weight = PLATFORM_WEIGHTS.get(platform, 1.0)
         direction = 1.0 if label == "Bullish" else (-1.0 if label == "Bearish" else 0.0)
+            
         final_score = direction * confidence * weight
         sentiment_scores.append(final_score)
             
     df['sentiment_scalar'] = sentiment_scores
     
+    return df
+
+def aggregate_and_save(df: pd.DataFrame, output_csv: str):
+    if df.empty or 'sentiment_scalar' not in df.columns:
+        print("Nenhum dado de sentimento para agregar. Pulando a gravação do CSV.")
+        return
+
     print("\n[ETL - FASE 3] Agregando dados em janelas de 1 Hora...")
     
     df.set_index('created_at', inplace=True)
@@ -122,25 +159,73 @@ def step_2_transform_and_load():
         'text': 'count'
     }).rename(columns={'text': 'news_volume'})
     
-    hourly_df['sentiment_scalar'] = hourly_df['sentiment_scalar'].fillna(0.0)
-    hourly_df['news_volume'] = hourly_df['news_volume'].fillna(0)
+    # Forward-fill sentiment for hours with no news, then fill remaining NaNs with 0
+    hourly_df['sentiment_scalar'] = hourly_df['sentiment_scalar'].fillna(method='ffill').fillna(0.0)
+    hourly_df['news_volume'] = hourly_df['news_volume'].fillna(0).astype(int)
     
     hourly_df.index = hourly_df.index.strftime('%Y-%m-%d %H:00:00')
     hourly_df.index.name = 'timestamp'
-    
-    output_csv = "crypto_sentiment_1h.csv"
+
     hourly_df.to_csv(output_csv)
-    print(f"\n✅ SUCESSO! Dataset final gerado: {output_csv}")
+    print(f"\nDataset final gerado: {output_csv}")
     print(hourly_df.head(5))
 
+async def main():
+    parser = argparse.ArgumentParser(description="Pipeline de ETL para dados de sentimento de criptomoedas.")
+    parser.add_argument(
+        "mode", 
+        choices=["historical", "current"], 
+        help="Modo de execução: 'historical' para um período ou 'current' para dados recentes."
+    )
+    parser.add_argument(
+        "--query", 
+        type=str, 
+        default="Bitcoin", 
+        help="Termo de busca para as notícias."
+    )
+    parser.add_argument(
+        "--start_date", 
+        type=str, 
+        default="2023-01-01", 
+        help="Data de início (YYYY-MM-DD) para o modo 'historical'."
+    )
+    parser.add_argument(
+        "--end_date", 
+        type=str, 
+        default="2023-02-01", 
+        help="Data de fim (YYYY-MM-DD) para o modo 'historical'."
+    )
+    parser.add_argument(
+        "--subreddits", 
+        nargs='+', 
+        default=["Bitcoin", "CryptoCurrency", "CryptoMarkets"], 
+        help="Lista de subreddits para buscar."
+    )
+    parser.add_argument(
+        "--batch_size", 
+        type=int, 
+        default=32, 
+        help="Tamanho do batch para inferência do modelo NLP."
+    )
+    parser.add_argument(
+        "--output_csv", 
+        type=str, 
+        default="crypto_sentiment_1h.csv", 
+        help="Caminho para o arquivo CSV de saída."
+    )
+    args = parser.parse_args()
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        tg_path, rd_path, gn_path = await step_1_extract(
+            args.mode, args.start_date, args.end_date, args.query, args.subreddits, temp_dir
+        )
+        
+        print("\n[ETL - FASE 2] Unificando dados e inferindo Sentimento (CryptoBERT)...")
+        unified_df = unify_data(tg_path, rd_path, gn_path)
+        
+        sentiment_df = calculate_sentiment(unified_df, args.batch_size)
+        
+        aggregate_and_save(sentiment_df, args.output_csv)
+
 if __name__ == "__main__":
-    import sys
-    
-    mode = sys.argv[1] if len(sys.argv) > 1 else "historical"
-    
-    if mode not in ["historical", "current"]:
-        print("Uso: python -m src.data_pipeline.integrate_scrapers [historical|current]")
-        sys.exit(1)
-    
-    asyncio.run(step_1_extract(mode=mode))
-    step_2_transform_and_load()
+    asyncio.run(main())

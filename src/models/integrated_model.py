@@ -29,20 +29,16 @@ class IntegratedCryptoModel(nn.Module):
         lstm_output_dim = lstm_hidden_size * 2
         sentiment_input_dim = 1
         
-        # Project sentiment scalar to a higher dimension to act as a query
         self.sentiment_proj = nn.Linear(sentiment_input_dim, lstm_output_dim)
         self.attention = CrossAttention(query_dim=lstm_output_dim, key_dim=lstm_output_dim, hidden_dim=lstm_output_dim)
         
-        # The fuzzy layer now takes the output of the attention mechanism
         fuzzy_input_size = lstm_output_dim
         self.fuzzy = NeuroFuzzyLayer(fuzzy_input_size, num_rules)
 
     def forward(self, x_seq, sentiment_scalar):
-        # The LSTM now returns the full sequence of hidden states
-        lstm_sequence_out = self.lstm(x_seq) # Shape: (batch, seq_len, lstm_output_dim)
-        sentiment_query = self.sentiment_proj(sentiment_scalar).unsqueeze(1) # Shape: (batch, 1, lstm_output_dim)
+        lstm_sequence_out = self.lstm(x_seq)
+        sentiment_query = self.sentiment_proj(sentiment_scalar).unsqueeze(1)
         attended_context = self.attention(query=sentiment_query, key_value=lstm_sequence_out)
-        combined_input = attended_context.squeeze(1) # Shape: (batch, lstm_output_dim)
-        final_output = self.fuzzy(combined_input)
+        combined_input = attended_context.squeeze(1)
         
-        return final_output
+        return self.fuzzy(combined_input)

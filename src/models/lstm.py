@@ -19,5 +19,5 @@ class TemporalBiLSTM(nn.Module):
         h0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
         c0 = torch.zeros(self.num_layers * 2, x.size(0), self.hidden_size).to(x.device)
         out, _ = self.lstm(x, (h0, c0))
-        # Return the entire sequence of outputs to be used by an attention mechanism
+
         return out
