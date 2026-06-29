@@ -4,6 +4,7 @@ from datetime import datetime, timezone, timedelta
 from dotenv import load_dotenv
 from telethon.sync import TelegramClient
 from telethon.errors import FloodWaitError
+from tqdm.asyncio import tqdm
 
 load_dotenv()
 
@@ -44,7 +45,7 @@ class TelegramScraper:
         cutoff_time = datetime.now(timezone.utc) - timedelta(hours=self.hours_window)
         chans = channels or self.TARGET_CHANNELS
 
-        for channel in chans:
+        for channel in tqdm(chans, desc="Scanning Telegram Channels (Current)"):
             try:
                 print(f"Buscando no canal: @{channel}")
                 async for message in client.iter_messages(channel, limit=500):
@@ -82,7 +83,7 @@ class TelegramScraper:
         all_results = []
         chans = channels or self.TARGET_CHANNELS
 
-        for channel in chans:
+        for channel in tqdm(chans, desc="Scanning Telegram Channels (Historical)"):
             try:
                 async for message in client.iter_messages(channel, offset_date=end_date):
                     if not message.text:

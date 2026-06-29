@@ -7,6 +7,9 @@ from dateutil import parser
 import feedparser
 import requests
 from dotenv import load_dotenv
+from requests.exceptions import RequestException
+from tqdm import tqdm
+import praw
 
 load_dotenv()
 
@@ -17,7 +20,21 @@ class RedditScraper:
     def __init__(self):
         self.hours_window = int(os.getenv("HOURS_WINDOW", 24))
         self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 crypto_scraper_v1"
-    
+        
+        self.client_id = os.getenv("REDDIT_CLIENT_ID")
+        self.client_secret = os.getenv("REDDIT_CLIENT_SECRET")
+        self.reddit_user_agent = os.getenv("REDDIT_USER_AGENT")
+        
+        if self.client_id and self.client_secret and self.reddit_user_agent:
+            self.reddit = praw.Reddit(
+                client_id=self.client_id,
+                client_secret=self.client_secret,
+                user_agent=self.reddit_user_agent
+            )
+        else:
+            self.reddit = None
+            print("Credenciais da API do Reddit não encontradas. A coleta de dados históricos será desabilitada.")
+
     def get_current_data(self, query: str = None, subreddits: list = None) -> list:
         results = []
         subs = subreddits or self.TARGET_SUBREDDITS
@@ -68,66 +85,42 @@ class RedditScraper:
         return results
     
     def get_historical_data(self, start_date: str, end_date: str, subreddits: list = None) -> list:
-        base_url = "https://api.pullpush.io/reddit/search/submission/"
-        
+        if not self.reddit:
+            print("Coleta de dados históricos do Reddit desabilitada devido à falta de credenciais da API.")
+            return []
+
         start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
         end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
         
         all_results = []
         subs = subreddits or self.TARGET_SUBREDDITS
         
-        for sub in subs:
-            current_end_ts = end_ts
+        for sub_name in tqdm(subs, desc="Processing Subreddits"):
+            subreddit = self.reddit.subreddit(sub_name)
+            query = f"timestamp:{start_ts}..{end_ts}"
             
-            while current_end_ts > start_ts:
-                params = {
-                    "subreddit": sub,
-                    "after": start_ts,
-                    "before": current_end_ts,
-                    "size": 100,
-                    "sort": "desc"
-                }
-                
-                try:
-                    response = requests.get(base_url, params=params, timeout=10)
+            try:
+                for post in tqdm(subreddit.search(query, sort="new", syntax="cloudsearch"), desc=f"r/{sub_name}", leave=False):
+                    title = post.title
+                    body = post.selftext
                     
-                    if response.status_code == 429:
-                        time.sleep(10)
-                        continue
-                    elif response.status_code != 200:
-                        time.sleep(2)
+                    if body in ["[removed]", "[deleted]"]:
+                        body = ""
+                        
+                    full_text = f"{title}. {body}".strip()
+                    
+                    if len(full_text) < 10:
                         continue
                         
-                    data = response.json().get("data", [])
-                    
-                    if not data:
-                        break
-                        
-                    for post in data:
-                        title = post.get("title", "")
-                        body = post.get("selftext", "")
-                        
-                        if body in ["[removed]", "[deleted]"]:
-                            body = ""
-                            
-                        full_text = f"{title}. {body}".strip()
-                        
-                        if len(full_text) < 10:
-                            continue
-                            
-                        all_results.append({
-                            "url": post.get("full_link", ""),
-                            "text": full_text[:1500],
-                            "author": post.get("author", "Unknown"),
-                            "created_at": datetime.fromtimestamp(post.get("created_utc", 0), tz=timezone.utc).isoformat(),
-                            "upvotes": post.get("score", 0),
-                            "comments": post.get("num_comments", 0)
-                        })
-                        
-                    current_end_ts = data[-1]["created_utc"]
-                    time.sleep(1.5)
-                    
-                except Exception:
-                    time.sleep(5)
-                    
+                    all_results.append({
+                        "url": f"https://www.reddit.com{post.permalink}",
+                        "text": full_text[:1500],
+                        "author": post.author.name if post.author else "Unknown",
+                        "created_at": datetime.fromtimestamp(post.created_utc, tz=timezone.utc).isoformat(),
+                        "upvotes": post.score,
+                        "comments": post.num_comments
+                    })
+            except Exception as e:
+                print(f"Erro ao buscar dados no subreddit r/{sub_name}: {e}")
+
         return all_results

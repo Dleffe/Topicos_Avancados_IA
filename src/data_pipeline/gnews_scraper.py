@@ -5,6 +5,7 @@ from datetime import datetime, timezone, timedelta
 from dateutil import parser, relativedelta
 import feedparser
 from dotenv import load_dotenv
+from tqdm import tqdm
 
 load_dotenv()
 
@@ -72,52 +73,56 @@ class GoogleNewsScraper:
         results = []
         seen_links = set()
         
+        total_weeks = (end_dt - start_dt).days // 7 + 1
         current_dt = start_dt
-        while current_dt < end_dt:
-            next_dt = current_dt + relativedelta.relativedelta(weeks=1)
-            if next_dt > end_dt:
-                next_dt = end_dt
-                
-            str_after = current_dt.strftime("%Y-%m-%d")
-            str_before = next_dt.strftime("%Y-%m-%d")
-            
-            advanced_query = f"{query} after:{str_after} before:{str_before}"
-            encoded_query = urllib.parse.quote(advanced_query)
-            
-            gnews_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
-            
-            print(f"Buscando período: {str_after} a {str_before}")
-            feed = feedparser.parse(gnews_url, agent=self.user_agent)
-            
-            for entry in feed.entries:
-                link = getattr(entry, 'link', '')
-                if link in seen_links:
-                    continue
+        
+        with tqdm(total=total_weeks, desc="Fetching Google News (Weekly)") as pbar:
+            while current_dt < end_dt:
+                next_dt = current_dt + relativedelta.relativedelta(weeks=1)
+                if next_dt > end_dt:
+                    next_dt = end_dt
                     
-                seen_links.add(link)
+                str_after = current_dt.strftime("%Y-%m-%d")
+                str_before = next_dt.strftime("%Y-%m-%d")
                 
-                try:
-                    pub_date = parser.parse(entry.published)
-                    if pub_date.tzinfo is None:
-                        pub_date = pub_date.replace(tzinfo=timezone.utc)
-                except Exception:
-                    continue
-                    
-                source_name = "News Outlet"
-                if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
-                    source_name = entry.source.title
-                elif hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
-                    source_name = feed.feed.title
-                    
-                results.append({
-                    "title": getattr(entry, 'title', ''),
-                    "desc": getattr(entry, 'description', ''),
-                    "link": link,
-                    "date": pub_date.isoformat(),
-                    "source": source_name
-                })
+                advanced_query = f"{query} after:{str_after} before:{str_before}"
+                encoded_query = urllib.parse.quote(advanced_query)
                 
-            current_dt = next_dt
-            time.sleep(2)
+                gnews_url = f"https://news.google.com/rss/search?q={encoded_query}&hl=en-US&gl=US&ceid=US:en"
+                
+                pbar.set_postfix_str(f"{str_after} to {str_before}")
+                feed = feedparser.parse(gnews_url, agent=self.user_agent)
+                
+                for entry in feed.entries:
+                    link = getattr(entry, 'link', '')
+                    if link in seen_links:
+                        continue
+                        
+                    seen_links.add(link)
+                    
+                    try:
+                        pub_date = parser.parse(entry.published)
+                        if pub_date.tzinfo is None:
+                            pub_date = pub_date.replace(tzinfo=timezone.utc)
+                    except Exception:
+                        continue
+                        
+                    source_name = "News Outlet"
+                    if hasattr(entry, 'source') and hasattr(entry.source, 'title'):
+                        source_name = entry.source.title
+                    elif hasattr(feed, 'feed') and hasattr(feed.feed, 'title'):
+                        source_name = feed.feed.title
+                        
+                    results.append({
+                        "title": getattr(entry, 'title', ''),
+                        "desc": getattr(entry, 'description', ''),
+                        "link": link,
+                        "date": pub_date.isoformat(),
+                        "source": source_name
+                    })
+                    
+                current_dt = next_dt
+                time.sleep(2)
+                pbar.update(1)
             
         return results

@@ -6,16 +6,14 @@ import argparse
 import tempfile
 import torch
 from transformers import pipeline
+from tqdm import tqdm
 
 from src.data_pipeline.gnews_scraper import GoogleNewsScraper
 from src.data_pipeline.reddit_scraper import RedditScraper
 from src.data_pipeline.telegram_scraper import TelegramScraper
 
-START_DATE = "2023-01-01"
-END_DATE = "2023-02-01"
-QUERY = "Bitcoin"
-TARGET_SUBREDDITS = ["Bitcoin", "CryptoCurrency", "CryptoMarkets"]
-# Constants that are less likely to change can remain here
+START_DATE = "2022-01-01"
+END_DATE = "2023-06-30"
 PLATFORM_WEIGHTS = {"Telegram": 1.2, "Google News": 1.0, "Reddit": 0.8}
 MODEL_NAME = "ElKulako/cryptobert"
  
@@ -32,49 +30,56 @@ def load_json(filepath: str) -> list:
 def save_json(data: list, filepath: str) -> None:
     with open(filepath, 'w', encoding='utf-8') as f:
         json.dump(data, f, ensure_ascii=False, indent=4)
-async def step_1_extract(mode: str, start_date: str, end_date: str, query: str, subreddits: list, temp_dir: str):
+async def step_1_extract(mode: str, start_date: str, end_date: str, query: str, subreddits: list, temp_dir: str,
+                         disable_telegram: bool, disable_reddit: bool, disable_gnews: bool):
     print(f"\n[ETL - FASE 1] Extraindo dados em modo: {mode}")
-    
-    gnews_scraper = GoogleNewsScraper()
-    reddit_scraper = RedditScraper()
-    telegram_scraper = TelegramScraper()
 
     telegram_path = os.path.join(temp_dir, "telegram_data.json")
     reddit_path = os.path.join(temp_dir, "reddit_data.json")
     gnews_path = os.path.join(temp_dir, "gnews_data.json")
-    
-    if mode == "historical":
+
+    if disable_telegram:
+        print("1/3 -> Coleta do Telegram desabilitada. Pulando.")
+        save_json([], telegram_path)
+    else:
         print("1/3 -> Procurando Telegram...")
-        start_dt = pd.to_datetime(start_date)
-        end_dt = pd.to_datetime(end_date)
-        telegram_data = await telegram_scraper.get_historical_data(
-            start_dt.year, start_dt.month, 
-            end_dt.year, end_dt.month,
-            channels=None
-        )
+        telegram_scraper = TelegramScraper()
+        if mode == "historical":
+            start_dt = pd.to_datetime(start_date)
+            end_dt = pd.to_datetime(end_date)
+            telegram_data = await telegram_scraper.get_historical_data(
+                start_dt.year, start_dt.month, end_dt.year, end_dt.month, channels=None
+            )
+        else:
+            telegram_data = await telegram_scraper.get_current_data(query=query)
         save_json(telegram_data, telegram_path)
-        
-        print("2/3 -> Procurando Reddit (PullPush)...")
-        reddit_data = reddit_scraper.get_historical_data(start_date, end_date, subreddits)
+
+    if disable_reddit:
+        print("2/3 -> Coleta do Reddit desabilitada. Pulando.")
+        save_json([], reddit_path)
+    else:
+        reddit_scraper = RedditScraper()
+        if mode == "historical":
+            print("2/3 -> Procurando Reddit (PullPush)...")
+            reddit_data = reddit_scraper.get_historical_data(start_date, end_date, subreddits)
+        else:
+            print("2/3 -> Procurando Reddit...")
+            reddit_data = reddit_scraper.get_current_data(query=query, subreddits=subreddits)
         save_json(reddit_data, reddit_path)
-        
-        print("3/3 -> Procurando Google News...")
-        gnews_data = gnews_scraper.get_historical_data(query, start_date, end_date)
+
+    if disable_gnews:
+        print("3/3 -> Coleta do Google News desabilitada. Pulando.")
+        save_json([], gnews_path)
+    else:
+        gnews_scraper = GoogleNewsScraper()
+        if mode == "historical":
+            print("3/3 -> Procurando Google News...")
+            gnews_data = gnews_scraper.get_historical_data(query, start_date, end_date)
+        else:
+            print("3/3 -> Procurando Google News...")
+            gnews_data = gnews_scraper.get_current_data(query=query)
         save_json(gnews_data, gnews_path)
 
-    elif mode == "current":
-        print("1/3 -> Procurando Telegram...")
-        telegram_data = await telegram_scraper.get_current_data(query=query)
-        save_json(telegram_data, telegram_path)
-        
-        print("2/3 -> Procurando Reddit...")
-        reddit_data = reddit_scraper.get_current_data(query=query, subreddits=subreddits)
-        save_json(reddit_data, reddit_path)
-        
-        print("3/3 -> Procurando Google News...")
-        gnews_data = gnews_scraper.get_current_data(query=query)
-        save_json(gnews_data, gnews_path)
-    
     print("[ETL - FASE 1] Concluída. Arquivos JSON temporários gerados.")
     return telegram_path, reddit_path, gnews_path
 
@@ -127,20 +132,22 @@ def calculate_sentiment(df: pd.DataFrame, batch_size: int) -> pd.DataFrame:
     
     print(f"Calculando escores de sentimento em batch (tamanho={batch_size})...")
     
-    texts_to_process = df['text'].str.slice(0, 1500).tolist()
-    results = sentiment_pipeline(texts_to_process, batch_size=batch_size)
+    texts_to_process = df['text'].str.slice(0, 1500).tolist()    
+    results = []
+    for out in tqdm(sentiment_pipeline(texts_to_process, batch_size=batch_size), total=len(texts_to_process), desc="Inferring Sentiment"):
+        results.append(out)
     
     sentiment_scores = []
     for i, result in enumerate(results):
         label = result["label"]
         confidence = result["score"]
-        platform = df.iloc[i]['platform']        
+        platform = df.iloc[i]['platform']
         weight = PLATFORM_WEIGHTS.get(platform, 1.0)
         direction = 1.0 if label == "Bullish" else (-1.0 if label == "Bearish" else 0.0)
-            
+        
         final_score = direction * confidence * weight
         sentiment_scores.append(final_score)
-            
+    
     df['sentiment_scalar'] = sentiment_scores
     
     return df
@@ -159,7 +166,6 @@ def aggregate_and_save(df: pd.DataFrame, output_csv: str):
         'text': 'count'
     }).rename(columns={'text': 'news_volume'})
     
-    # Forward-fill sentiment for hours with no news, then fill remaining NaNs with 0
     hourly_df['sentiment_scalar'] = hourly_df['sentiment_scalar'].fillna(method='ffill').fillna(0.0)
     hourly_df['news_volume'] = hourly_df['news_volume'].fillna(0).astype(int)
     
@@ -213,11 +219,27 @@ async def main():
         default="crypto_sentiment_1h.csv", 
         help="Caminho para o arquivo CSV de saída."
     )
+    parser.add_argument(
+        "--disable-telegram",
+        action="store_true",
+        help="Se definido, desabilita a coleta de dados do Telegram."
+    )
+    parser.add_argument(
+        "--disable-reddit",
+        action="store_true",
+        help="Se definido, desabilita a coleta de dados do Reddit."
+    )
+    parser.add_argument(
+        "--disable-gnews",
+        action="store_true",
+        help="Se definido, desabilita a coleta de dados do Google News."
+    )
     args = parser.parse_args()
 
     with tempfile.TemporaryDirectory() as temp_dir:
         tg_path, rd_path, gn_path = await step_1_extract(
-            args.mode, args.start_date, args.end_date, args.query, args.subreddits, temp_dir
+            args.mode, args.start_date, args.end_date, args.query,
+            args.subreddits, temp_dir, args.disable_telegram, args.disable_reddit, args.disable_gnews
         )
         
         print("\n[ETL - FASE 2] Unificando dados e inferindo Sentimento (CryptoBERT)...")
