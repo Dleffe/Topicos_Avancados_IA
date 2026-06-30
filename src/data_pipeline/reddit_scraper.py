@@ -7,9 +7,6 @@ from dateutil import parser
 import feedparser
 import requests
 from dotenv import load_dotenv
-from requests.exceptions import RequestException
-from tqdm import tqdm
-import praw
 
 load_dotenv()
 
@@ -20,21 +17,7 @@ class RedditScraper:
     def __init__(self):
         self.hours_window = int(os.getenv("HOURS_WINDOW", 24))
         self.user_agent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36 crypto_scraper_v1"
-        
-        self.client_id = os.getenv("REDDIT_CLIENT_ID")
-        self.client_secret = os.getenv("REDDIT_CLIENT_SECRET")
-        self.reddit_user_agent = os.getenv("REDDIT_USER_AGENT")
-        
-        if self.client_id and self.client_secret and self.reddit_user_agent:
-            self.reddit = praw.Reddit(
-                client_id=self.client_id,
-                client_secret=self.client_secret,
-                user_agent=self.reddit_user_agent
-            )
-        else:
-            self.reddit = None
-            print("Credenciais da API do Reddit não encontradas. A coleta de dados históricos será desabilitada.")
-
+    
     def get_current_data(self, query: str = None, subreddits: list = None) -> list:
         results = []
         subs = subreddits or self.TARGET_SUBREDDITS
@@ -84,43 +67,191 @@ class RedditScraper:
             
         return results
     
-    def get_historical_data(self, start_date: str, end_date: str, subreddits: list = None) -> list:
-        if not self.reddit:
-            print("Coleta de dados históricos do Reddit desabilitada devido à falta de credenciais da API.")
-            return []
-
-        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
-        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+    def get_historical_data(self, start_date: str, end_date: str, subreddits: list = None, min_upvotes: int = 5) -> list:
+        """
+        Coleta posts históricos do Reddit usando a API do Arctic Shift (estável, sem rate limit agressivo).
+        Fallback para PullPush caso Arctic Shift falhe.
         
+        Args:
+            start_date: Data inicial no formato "YYYY-MM-DD"
+            end_date: Data final no formato "YYYY-MM-DD"
+            subreddits: Lista de subreddits (usa TARGET_SUBREDDITS se None)
+            min_upvotes: Mínimo de upvotes para filtrar posts relevantes (padrão: 5)
+        """
         all_results = []
         subs = subreddits or self.TARGET_SUBREDDITS
         
-        for sub_name in tqdm(subs, desc="Processing Subreddits"):
-            subreddit = self.reddit.subreddit(sub_name)
-            query = f"timestamp:{start_ts}..{end_ts}"
+        for sub in subs:
+            print(f"\n📡 Coletando histórico de r/{sub} ({start_date} → {end_date})...")
+            posts = self._fetch_arctic_shift(sub, start_date, end_date)
+            
+            # Fallback para PullPush se Arctic Shift falhar
+            if posts is None:
+                print(f"⚠️  Arctic Shift falhou para r/{sub}, tentando PullPush...")
+                posts = self._fetch_pullpush(sub, start_date, end_date)
+            
+            if not posts:
+                print(f"❌ Nenhum post obtido para r/{sub}")
+                continue
+            
+            # Filtra e formata os resultados
+            count_before = len(posts)
+            for post in posts:
+                title = post.get("title", "")
+                body = post.get("selftext", "") or ""
+                
+                if body in ["[removed]", "[deleted]"]:
+                    body = ""
+                    
+                full_text = f"{title}. {body}".strip()
+                
+                if len(full_text) < 10:
+                    continue
+                    
+                upvotes = post.get("score", 0) or 0
+                if upvotes < min_upvotes:
+                    continue
+                    
+                permalink = post.get("full_link") or post.get("permalink", "")
+                if permalink and not permalink.startswith("http"):
+                    permalink = f"https://www.reddit.com{permalink}"
+                    
+                all_results.append({
+                    "url": permalink,
+                    "text": full_text[:1500],
+                    "author": post.get("author", "Unknown"),
+                    "created_at": datetime.fromtimestamp(post.get("created_utc", 0), tz=timezone.utc).isoformat(),
+                    "upvotes": upvotes,
+                    "comments": post.get("num_comments", 0) or 0
+                })
+            
+            print(f"✅ r/{sub}: {len(posts)} posts brutos → {len(all_results)} relevantes (min {min_upvotes} upvotes)")
+                    
+        return all_results
+    
+    def _fetch_arctic_shift(self, subreddit: str, start_date: str, end_date: str) -> list:
+        """Busca posts via Arctic Shift API (estável, sem 429)."""
+        base_url = "https://arctic-shift.photon-reddit.com/api/posts/search"
+        all_posts = []
+        current_before = end_date
+        max_failures = 3
+        failures = 0
+        
+        while True:
+            params = {
+                "subreddit": subreddit,
+                "after": start_date,
+                "before": current_before,
+                "limit": 100,
+                "sort": "desc",
+                "sort_type": "created_utc"
+            }
             
             try:
-                for post in tqdm(subreddit.search(query, sort="new", syntax="cloudsearch"), desc=f"r/{sub_name}", leave=False):
-                    title = post.title
-                    body = post.selftext
+                response = requests.get(base_url, params=params, timeout=120, 
+                                       headers={"User-Agent": self.user_agent})
+                
+                if response.status_code != 200:
+                    failures += 1
+                    print(f"  ⚠️  Arctic Shift HTTP {response.status_code}")
+                    if failures >= max_failures:
+                        return None  # Sinaliza para usar fallback
+                    time.sleep(3)
+                    continue
                     
-                    if body in ["[removed]", "[deleted]"]:
-                        body = ""
-                        
-                    full_text = f"{title}. {body}".strip()
+                data = response.json().get("data", [])
+                
+                if not data:
+                    break
                     
-                    if len(full_text) < 10:
-                        continue
-                        
-                    all_results.append({
-                        "url": f"https://www.reddit.com{post.permalink}",
-                        "text": full_text[:1500],
-                        "author": post.author.name if post.author else "Unknown",
-                        "created_at": datetime.fromtimestamp(post.created_utc, tz=timezone.utc).isoformat(),
-                        "upvotes": post.score,
-                        "comments": post.num_comments
-                    })
+                all_posts.extend(data)
+                failures = 0
+                
+                # Paginação: pega o timestamp do último post
+                last_ts = data[-1].get("created_utc")
+                if last_ts is None:
+                    break
+                    
+                # Converte timestamp para string ISO para o próximo request
+                current_before = datetime.fromtimestamp(last_ts, tz=timezone.utc).strftime("%Y-%m-%dT%H:%M:%S")
+                
+                print(f"  📥 {len(all_posts)} posts coletados até agora...")
+                time.sleep(1)  # Delay respeitoso
+                
+            except requests.exceptions.Timeout:
+                failures += 1
+                print(f"  ⏱️  Timeout na requisição ({failures}/{max_failures})")
+                if failures >= max_failures:
+                    return None
+                time.sleep(5)
             except Exception as e:
-                print(f"Erro ao buscar dados no subreddit r/{sub_name}: {e}")
-
-        return all_results
+                failures += 1
+                print(f"  ❌ Erro: {e} ({failures}/{max_failures})")
+                if failures >= max_failures:
+                    return None
+                time.sleep(3)
+        
+        return all_posts
+    
+    def _fetch_pullpush(self, subreddit: str, start_date: str, end_date: str) -> list:
+        """Fallback: busca via PullPush API (mais lento, sujeito a rate limit)."""
+        base_url = "https://api.pullpush.io/reddit/search/submission/"
+        start_ts = int(datetime.strptime(start_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+        end_ts = int(datetime.strptime(end_date, "%Y-%m-%d").replace(tzinfo=timezone.utc).timestamp())
+        
+        all_posts = []
+        current_end = end_ts
+        failures = 0
+        max_failures = 3
+        
+        while current_end > start_ts:
+            params = {
+                "subreddit": subreddit,
+                "after": start_ts,
+                "before": current_end,
+                "size": 100,
+                "sort": "desc"
+            }
+            
+            try:
+                response = requests.get(base_url, params=params, timeout=120)
+                
+                if response.status_code == 429:
+                    failures += 1
+                    if failures >= max_failures:
+                        print(f"  ⚠️  Rate limit persistente no PullPush, parando.")
+                        break
+                    wait = 15 * failures
+                    print(f"  ⏳ Rate limit, aguardando {wait}s...")
+                    time.sleep(wait)
+                    continue
+                elif response.status_code != 200:
+                    failures += 1
+                    if failures >= max_failures:
+                        break
+                    time.sleep(3)
+                    continue
+                    
+                data = response.json().get("data", [])
+                if not data:
+                    break
+                    
+                all_posts.extend(data)
+                failures = 0
+                
+                last_ts = data[-1].get("created_utc")
+                if last_ts is None or last_ts >= current_end:
+                    break
+                current_end = last_ts - 1
+                
+                print(f"  📥 {len(all_posts)} posts coletados (PullPush)...")
+                time.sleep(2)
+                
+            except Exception as e:
+                failures += 1
+                if failures >= max_failures:
+                    print(f"  ❌ Falhas consecutivas no PullPush: {e}")
+                    break
+                time.sleep(5)
+        
+        return all_posts
