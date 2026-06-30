@@ -38,10 +38,10 @@ def run_inference(binance_csv_path, sentiment_csv_path, scaler_path, weights_pat
     return prediction.item()
 
 if __name__ == "__main__":
-    binance_data = "../data/processed/binance_btc_1h_features.csv"
-    sentiment_data = "../data/processed/crypto_sentiment_1h.csv"
-    scaler_file = "../data/scalers/temporal_scaler.pkl"
-    weights_file = "../weights/best_crypto_model.pth"
+    binance_data = "data/processed/binance_btc_1h_features.csv"
+    sentiment_data = "data/processed/crypto_sentiment_1h.csv"
+    scaler_file = "data/scalers/temporal_scaler.pkl"
+    weights_file = "weights/best_crypto_model.pth"
     
     predicted_return = run_inference(binance_data, sentiment_data, scaler_file, weights_file)
     print(predicted_return)

@@ -1,3 +1,4 @@
+import os
 import torch
 from torch.utils.data import Dataset, DataLoader
 import pandas as pd
@@ -22,9 +23,10 @@ class CryptoMultimodalDataset(Dataset):
         if is_training:
             self.scaler = StandardScaler()
             self.temporal_features = self.scaler.fit_transform(self.temporal_features)
-            joblib.dump(self.scaler, 'temporal_scaler.pkl') 
+            os.makedirs("data/scalers", exist_ok=True)
+            joblib.dump(self.scaler, 'data/scalers/temporal_scaler.pkl')
         else:
-            self.scaler = joblib.load('temporal_scaler.pkl')
+            self.scaler = joblib.load('data/scalers/temporal_scaler.pkl')
             self.temporal_features = self.scaler.transform(self.temporal_features)
             
         self.seq_length = seq_length

@@ -57,10 +57,10 @@ def process_technical_indicators(df):
     df['macd_hist'] = macd['MACDh_12_26_9']
     
     bbands = ta.bbands(df['close'], length=20, std=2)
-    df['bb_upper'] = bbands['BBU_20_2.0']
-    df['bb_middle'] = bbands['BBM_20_2.0']
-    df['bb_lower'] = bbands['BBL_20_2.0']
-    df['bb_width'] = bbands['BBB_20_2.0'] 
+    df['bb_upper'] = bbands.filter(like='BBU').iloc[:, 0]
+    df['bb_middle'] = bbands.filter(like='BBM').iloc[:, 0]
+    df['bb_lower'] = bbands.filter(like='BBL').iloc[:, 0]
+    df['bb_width'] = bbands.filter(like='BBB').iloc[:, 0]
     
     df['target_return'] = np.log(df['close'].shift(-1) / df['close'])
     
@@ -68,13 +68,16 @@ def process_technical_indicators(df):
     return df
 
 if __name__ == "__main__":
+    import os
+    out_path = "data/processed/binance_btc_1h_features.csv"
+    os.makedirs("data/processed", exist_ok=True)
+
     print("Baixando dados da Binance...")
     df_raw = fetch_binance_ohlcv("BTCUSDT", "1h", "2022-01-01", "2023-07-01")
-    
+
     print("Calculando indicadores técnicos...")
     df_processed = process_technical_indicators(df_raw)
-    
+
     df_processed.index = df_processed.index.strftime('%Y-%m-%d %H:00:00')
-    df_processed.to_csv("binance_btc_1h_features.csv")
-    
-    print("Arquivo binance_btc_1h_features.csv salvo.")
+    df_processed.to_csv(out_path)
+    print(f"Arquivo salvo em {out_path}")

@@ -2,16 +2,16 @@ import os
 import torch
 import torch.nn as nn
 import torch.optim as optim
-from torch.utils.data import DataLoader, random_split
+from torch.utils.data import DataLoader, Subset
 from src.models.dataset import CryptoMultimodalDataset
 from src.models.integrated_model import IntegratedCryptoModel
 
 def train_model():
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    
-    data_path_binance = "../data/processed/binance_btc_1h_features.csv"
-    data_path_sentiment = "../data/processed/crypto_sentiment_1h.csv"
-    weights_dir = "../weights"
+
+    data_path_binance = "data/processed/binance_btc_1h_features.csv"
+    data_path_sentiment = "data/processed/crypto_sentiment_1h.csv"
+    weights_dir = "weights"
     os.makedirs(weights_dir, exist_ok=True)
 
     dataset = CryptoMultimodalDataset(
@@ -22,11 +22,11 @@ def train_model():
     )
 
     train_size = int(0.8 * len(dataset))
-    val_size = len(dataset) - train_size
-    train_dataset, val_dataset = random_split(dataset, [train_size, val_size])
+    train_dataset = Subset(dataset, range(train_size))
+    val_dataset   = Subset(dataset, range(train_size, len(dataset)))
 
     train_loader = DataLoader(train_dataset, batch_size=32, shuffle=True)
-    val_loader = DataLoader(val_dataset, batch_size=32, shuffle=False)
+    val_loader   = DataLoader(val_dataset,   batch_size=32, shuffle=False)
 
     model = IntegratedCryptoModel(
         lstm_input_size=8,
@@ -37,7 +37,8 @@ def train_model():
     ).to(device)
 
     criterion = nn.MSELoss()
-    optimizer = optim.Adam(model.parameters(), lr=0.001)
+    optimizer = optim.Adam(model.parameters(), lr=0.0005)
+    scheduler = optim.lr_scheduler.ReduceLROnPlateau(optimizer, patience=5, factor=0.5)
 
     epochs = 50
     best_val_loss = float('inf')
@@ -53,9 +54,10 @@ def train_model():
 
             optimizer.zero_grad()
             predictions = model(seq_batch, sent_batch)
-            
+
             loss = criterion(predictions, target_batch)
             loss.backward()
+            torch.nn.utils.clip_grad_norm_(model.parameters(), max_norm=1.0)
             optimizer.step()
             
             train_loss += loss.item() * seq_batch.size(0)
@@ -77,7 +79,17 @@ def train_model():
                 
         val_loss /= len(val_loader.dataset)
 
-        print(f"Epoch {epoch+1}/{epochs} | Train Loss: {train_loss:.6f} | Val Loss: {val_loss:.6f}")
+        scheduler.step(val_loss)
+
+        model.eval()
+        with torch.no_grad():
+            sample_seq, sample_sent, sample_target = next(iter(val_loader))
+            sample_pred = model(sample_seq.to(device), sample_sent.to(device))
+        pred_std = sample_pred.std().item()
+        tgt_std  = sample_target.std().item()
+
+        lr = optimizer.param_groups[0]['lr']
+        print(f"Epoch {epoch+1}/{epochs} | Train: {train_loss:.6f} | Val: {val_loss:.6f} | LR: {lr:.6f} | pred_std={pred_std:.6f} | tgt_std={tgt_std:.6f}")
 
         if val_loss < best_val_loss:
             best_val_loss = val_loss

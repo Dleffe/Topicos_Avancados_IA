@@ -1,24 +1,29 @@
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
 
 class GaussianMembership(nn.Module):
     def __init__(self, num_features, num_rules):
         super(GaussianMembership, self).__init__()
-        self.mu = nn.Parameter(torch.randn(num_rules, num_features))
-        self.sigma = nn.Parameter(torch.ones(num_rules, num_features))
+        self.mu        = nn.Parameter(torch.randn(num_rules, num_features))
+        self.log_sigma = nn.Parameter(torch.full((num_rules, num_features), -1.0))
 
     def forward(self, x):
-        x = x.unsqueeze(1)
-        return torch.exp(-0.5 * ((x - self.mu) / (self.sigma ** 2 + 1e-6)) ** 2)
+        x     = x.unsqueeze(1)
+        sigma = F.softplus(self.log_sigma) + 0.05
+        return torch.exp(-0.5 * ((x - self.mu) / sigma) ** 2)
 
 class NeuroFuzzyLayer(nn.Module):
-    def __init__(self, input_size, num_rules):
+    def __init__(self, input_size, num_rules, n_proj=4):
         super(NeuroFuzzyLayer, self).__init__()
-        self.membership = GaussianMembership(input_size, num_rules)
+        self.proj         = nn.Linear(input_size, n_proj)
+        self.norm         = nn.LayerNorm(n_proj)
+        self.membership   = GaussianMembership(n_proj, num_rules)
         self.rule_weights = nn.Parameter(torch.randn(num_rules, 1))
 
     def forward(self, x):
-        mu_x = self.membership(x)
+        x               = self.norm(self.proj(x))
+        mu_x            = self.membership(x)
         firing_strength = torch.prod(mu_x, dim=2)
-        normalized_firing = firing_strength / (torch.sum(firing_strength, dim=1, keepdim=True) + 1e-6)
-        return torch.matmul(normalized_firing, self.rule_weights)
+        normalized      = firing_strength / (firing_strength.sum(dim=1, keepdim=True) + 1e-9)
+        return torch.matmul(normalized, self.rule_weights)
