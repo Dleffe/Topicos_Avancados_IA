@@ -145,6 +145,8 @@ def run_sentiment(records: list, batch_size: int) -> list:
     for record, result in zip(records, results):
         direction = 1.0 if result['label'] == 'Bullish' else (-1.0 if result['label'] == 'Bearish' else 0.0)
         weight    = PLATFORM_WEIGHTS.get(record['platform'], 1.0)
+        record['sentiment_label']  = result['label']
+        record['sentiment_score']  = result['score']
         record['sentiment_scalar'] = direction * result['score'] * weight
 
     return records
@@ -157,37 +159,52 @@ def aggregate_to_csv(records: list, output_csv: str) -> None:
 
     print("\n[FASE 3] Agregando em janelas de 1h...")
 
-    hourly_scores  = defaultdict(list)
-    hourly_volumes = defaultdict(int)
+    hourly_scalars = defaultdict(list)
+    hourly_labels  = defaultdict(list)
 
     for r in records:
-        dt  = r['created_at']
-        key = dt.replace(minute=0, second=0, microsecond=0)
-        hourly_scores[key].append(r['sentiment_scalar'])
-        hourly_volumes[key] += 1
+        key = r['created_at'].replace(minute=0, second=0, microsecond=0)
+        hourly_scalars[key].append(r['sentiment_scalar'])
+        hourly_labels[key].append(r.get('sentiment_label', 'Neutral'))
 
-    all_hours   = sorted(hourly_scores)
-    start_hour  = all_hours[0]
-    end_hour    = all_hours[-1]
+    all_hours    = sorted(hourly_scalars)
+    start_hour   = all_hours[0]
+    end_hour     = all_hours[-1]
 
-    rows         = []
-    prev_sent    = 0.0
-    current_hour = start_hour
+    rows             = []
+    prev_mean        = 0.0
+    prev_bull_ratio  = 0.0
+    prev_bear_ratio  = 0.0
+    current_hour     = start_hour
 
     while current_hour <= end_hour:
-        scores = hourly_scores.get(current_hour)
-        if scores:
-            sentiment    = sum(scores) / len(scores)
-            volume       = hourly_volumes[current_hour]
-            prev_sent    = sentiment
+        scalars = hourly_scalars.get(current_hour)
+        if scalars:
+            labels      = hourly_labels[current_hour]
+            n           = len(scalars)
+            mean_sent   = sum(scalars) / n
+            bull_ratio  = sum(1 for l in labels if l == 'Bullish') / n
+            bear_ratio  = sum(1 for l in labels if l == 'Bearish') / n
+            mean_sq     = sum(s * s for s in scalars) / n
+            dispersion  = max(0.0, mean_sq - mean_sent ** 2) ** 0.5
+
+            prev_mean       = mean_sent
+            prev_bull_ratio = bull_ratio
+            prev_bear_ratio = bear_ratio
         else:
-            sentiment = prev_sent
-            volume    = 0
+            n          = 0
+            mean_sent  = prev_mean
+            bull_ratio = prev_bull_ratio
+            bear_ratio = prev_bear_ratio
+            dispersion = 0.0
 
         rows.append({
-            'timestamp':        current_hour.strftime('%Y-%m-%d %H:00:00'),
-            'sentiment_scalar': sentiment,
-            'news_volume':      volume,
+            'timestamp':            current_hour.strftime('%Y-%m-%d %H:00:00'),
+            'sentiment_mean':       mean_sent,
+            'news_volume':          n,
+            'bullish_ratio':        bull_ratio,
+            'bearish_ratio':        bear_ratio,
+            'sentiment_dispersion': dispersion,
         })
         current_hour += timedelta(hours=1)
 

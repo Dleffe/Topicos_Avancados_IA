@@ -22,23 +22,24 @@ class CrossAttention(nn.Module):
         return self.out_proj(context)
 
 class IntegratedCryptoModel(nn.Module):
-    def __init__(self, lstm_input_size, lstm_hidden_size, lstm_num_layers, num_rules, dropout=0.2):
+    def __init__(self, lstm_input_size, lstm_hidden_size, lstm_num_layers, num_rules, dropout=0.2, sentiment_input_dim=5):
         super(IntegratedCryptoModel, self).__init__()
         self.lstm = TemporalBiLSTM(lstm_input_size, lstm_hidden_size, lstm_num_layers, dropout)
-        
+
         lstm_output_dim = lstm_hidden_size * 2
-        sentiment_input_dim = 1
-        
+
         self.sentiment_proj = nn.Linear(sentiment_input_dim, lstm_output_dim)
         self.attention = CrossAttention(query_dim=lstm_output_dim, key_dim=lstm_output_dim, hidden_dim=lstm_output_dim)
         
-        fuzzy_input_size = lstm_output_dim
-        self.fuzzy = NeuroFuzzyLayer(fuzzy_input_size, num_rules)
+        fuzzy_input_size  = lstm_output_dim
+        self.fuzzy        = NeuroFuzzyLayer(fuzzy_input_size, num_rules)
+        self.combined_norm = nn.LayerNorm(lstm_output_dim)
+        self.direct_head  = nn.Linear(lstm_output_dim, 1)
 
     def forward(self, x_seq, sentiment_scalar):
         lstm_sequence_out = self.lstm(x_seq)
-        sentiment_query = self.sentiment_proj(sentiment_scalar).unsqueeze(1)
-        attended_context = self.attention(query=sentiment_query, key_value=lstm_sequence_out)
-        combined_input = attended_context.squeeze(1)
-        
-        return self.fuzzy(combined_input)
+        sentiment_query   = self.sentiment_proj(sentiment_scalar).unsqueeze(1)
+        attended_context  = self.attention(query=sentiment_query, key_value=lstm_sequence_out)
+        combined_input    = self.combined_norm(attended_context.squeeze(1))
+
+        return self.fuzzy(combined_input) + self.direct_head(combined_input)
